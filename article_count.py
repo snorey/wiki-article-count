@@ -5,357 +5,376 @@ import os
 import re
 from sys import stdout
 import time
+import unittest
 import urllib
 import urllib2
 
+# seconds to wait if download raises error
+STANDARD_DELAY = 10
+# username initially assigned to a revision
+DEFAULT_USERNAME = "UNASSIGNED"
+# username should never have default value,
+# so this should be noisy, not whitespace
 
-class Downloader:
+
+class Revision(object):
+
     def __init__(self):
-        self.dumpsurl="http://dumps.wikimedia.your.org/enwiki/latest/"
-        self.headers={'User-agent' : 'JumpingSpider/0.0'}
-        self.counters=[]
-        self.trackers=[]
-        self.matchups={}
-        self.replaced_users=set()
+        self.username = DEFAULT_USERNAME
+        self.is_article = False
+        self.title = ""
+        self.time = False
+        self.timestamp = False
 
-    def run(self, filepaths): # to just use already-downloaded DB files
+
+class Line(str):
+
+    @property
+    def is_start_of_page(self):
+        return self.startswith("<page")
+
+    @property
+    def is_end_of_page(self):
+        return self.startswith("</page")
+
+    @property
+    def is_start_of_revision(self):
+        return self.startswith("<revision")
+
+    @property
+    def is_timestamp(self):
+        return self.startswith("<timestamp>")
+
+    @property
+    def is_title(self):
+        return self.startswith("<title>")
+
+    @property
+    def is_namespace(self):
+        return self.startswith("<ns>")
+
+    @property
+    def is_article_namespace(self):
+        return self.startswith("<ns>0<")
+
+    @property
+    def is_redirect(self):
+        return self.startswith("<redirect")
+
+    @property
+    def is_username(self):
+        return self.startswith("<ip") or self.startswith("<username")
+
+    def get_title(self):
+        title = self.split(">")[1].split("<")[0]
+        title = title.strip()
+        return title
+
+    def get_timestamp(self):
+        timestamp = self.split(">")[1].split("<")[0]
+        return timestamp
+
+    def extract_username_string(self):
+        raw_username = self.split(">")[1].split("<")[0].strip()
+        return raw_username
+
+    def get_username(self):
+        if self.startswith("<ip>"):
+            # need to avoid giving first registered user credit for
+            # pages created by IP
+            username = "IP:" + self.extract_username_string()
+        elif self.startswith("<username />"):
+            # here the blank username is a deliberate MediaWiki feature
+            username = ""
+        elif self.startswith("<username"):
+            username = self.extract_username_string()
+        else:
+            username = DEFAULT_USERNAME
+        return username
+
+
+class Downloader(object):
+
+    def __init__(self):
+        self.dumpsurl = "http://dumps.wikimedia.your.org/enwiki/latest/"
+        self.headers = {'User-agent': 'JumpingSpider/0.0'}
+        self.counters = []
+        self.urls = []
+        self.matchups = {}
+        self.replaced_users = set()
+        self.temp_filepath = "stubhist_working.xml.gz"
+
+    def run_on_downloaded(self, filepaths):  # to just use already-downloaded DB files
         for f in filepaths:
             print f
-            self.countusers(f)
-            open("wikicount_dump.txt","w").write(self.dump())
+            counter = self.count_creators_in_file(f)
+            self.counters.append((f, counter))
+            open("wikicount_dump.txt", "w").write(self.dump())
 
-    def countusers(self,path,offset=0,cutoff=False):
+    @staticmethod
+    def prep_input_file(path, offset):
+        if type(path) not in [str, unicode]:
+            raise TypeError
         if path.endswith(".gz"):
-            file=gzip.GzipFile(path)
+            input_file = gzip.GzipFile(path)
         else:
-            file=open(path)
+            input_file = open(path)
         if offset:
-            file.seek(offset)
-        i=0
-        reading=False
-        reading_rev=False
+            input_file.seek(offset)
+        return input_file
+
+    def count_creators_in_file(self, path, offset=0):
+        input_file = self.prep_input_file(path, offset)
+        i = 0
+        reading = False
+        frame_is_open = False
+        this_revision = Revision()
+        oldest_revision = False
+        line = Line("")
+        counter = defaultdict(int)
         try:
-            for line in file:
-                i+=1 
-                line=line.strip()
-                if line.startswith("<page"):
-                    reading=True
-                    revisions=[]
-                    reading_rev=False
-                    thetitle=""
-                    continue
+            for raw_line in input_file:
+                i += 1
+                line = Line(raw_line.strip())
                 if reading is not True:
+                    if line.is_start_of_page:
+                        reading = True
+                        frame_is_open = False
+                        oldest_revision = False
+                        page_title = ""
+                        continue
                     continue
                 else:
-                    if line.startswith("</page>"):
-                        if revisions:
-                            sortedrevs=list(revisions)
-                            sortedrevs.sort()
-                            username=sortedrevs[0][1]
-                            if username != revisions[0][1]:
-                                self.replaced_users.add((thetitle,username,revisions[0][1]))
-                            self.matchups[thetitle]=username
+                    if line.is_title: # note this depends on <title> coming before any <rev>s
+                        page_title = line.get_title()
+                        continue
+                    elif line.is_namespace:
+                        if not line.is_article_namespace:
+                            reading = False
+                        continue
+                    elif line.is_redirect: # don't count redirects
+                        reading = False
+                        continue
+                    elif line.is_start_of_revision:
+                        frame_is_open = True
+                        this_revision = Revision()
+                        this_revision.title = page_title
+                        continue
+                    elif line.is_end_of_page:
+                        if oldest_revision:
+                            oldest_user = oldest_revision.username
+                            self.matchups[oldest_revision.title] = oldest_user
+                            counter[oldest_user] += 1
                         else:
-                            print "No revisions! ", thetitle
-                        reading=False
-                        reading_rev=False
-                        stdout.write("\r") #put progress counter here to minimize waste
-                        stdout.flush()
-                        stdout.write(str(i))
+                            print "No revisions!", pagetitle
+                        reading = False
+                        frame_is_open = False
+                        simple_progress_counter(i)
                         continue
-                    elif reading_rev is True:
-                        if line.startswith("<timestamp>"):
-                            timestamp=line.split(">")[1].split("<")[0]
+                    elif frame_is_open:
+                        if line.is_timestamp:
+                            this_revision.timestamp = line.get_timestamp()
                             continue
-                        elif line.startswith("<ip") or line.startswith("<username"): 
-                            if not timestamp: # just in case -- has not been triggered thus far
-                                print "No timestamp!",thetitle
+                        elif line.is_username:  # this comes last in a <rev>
+                            if not this_revision.timestamp:
+                                print "No timestamp!", page_title
                             else:
-                                thetime=dateutil.parser.parse(timestamp)
-                                if line.startswith("<ip>"): #need to avoid counting pages created by IP for the first registered user to edit
-                                    username="IP:"+line.split(">")[1].split("<")[0].strip()
-                                elif line.startswith("<username />"):
-                                    username=""
-                                elif line.startswith("<username"):
-                                    username=line.split(">")[1].split("<")[0].strip()
+                                thetime = dateutil.parser.parse(this_revision.timestamp)  # returns datetime object
+                                this_revision.time = thetime.isoformat()  # string operations faster than datetime
+                                this_revision.username = line.get_username()
+                                if not oldest_revision:
+                                    oldest_revision = this_revision
                                 else:
-                                    username="UNASSIGNED" #make sure there is no leak here
-                                revisions.append((thetime,username))
-                            reading_rev=False
-                    elif line.startswith("<revision"):
-                        reading_rev=True
-                        timestamp=""
-                        username=""
-                        continue
-                    elif line.startswith("<title>"):
-                        thetitle=line.split(">")[1].split("<")[0].strip()
-                        continue
-                    elif line.startswith("<ns>"):
-                        if not line.startswith("<ns>0<"):
-                            reading=False
-                            continue
-                    elif line.startswith("<redirect"):
-                        reading=False
-                        continue
+                                    if this_revision.time < oldest_revision.time:
+                                        oldest_revision = this_revision
+                            frame_is_open = False
         except Exception, e:
-            print str(e), line
+            print str(e)
+            print line
+        except KeyboardInterrupt:
+            pass
+        return counter
             
-    def process(self): # get URLs of all pre-combination stub-meta-history files
-        request=urllib2.Request(self.dumpsurl,headers=self.headers)
-        dumpspage=urllib2.urlopen(request,timeout=240).read()
-        urlpaths=re.findall('"[^"]+-stub-meta-history\d.*?\.xml\.gz"',dumpspage)
-        self.urls=[self.dumpsurl+x.replace('"','') for x in urlpaths]
-        
-    def go(self): # to download, process, and delete the segmented stub-meta-history files in sequence
-        if not hasattr(self,"urls"):
-            self.process()
-        doneurls=[x[0] for x in self.counters]
-        for u in self.urls:
-            if u in doneurls:
-                print u,"already done"
-                continue
-            filepath="stubhist_working.xml.gz"
-            print "Downloading "+u
-            done=False
-            while not done:
-                try:
-                    urllib.urlretrieve(u, filepath)
-                    done=True
-                except Exception, e:
-                    print str(e)
-                    time.sleep(10)
-            print "Reading...."
-            gfile=gzip.GzipFile(filepath)
-            with gfile:
-                self.counters.append((u,self.countusers(gfile))) # avoid dict of dicts, too slippery
-            print
-            print "Deleting ...."
-            os.unlink(filepath)
+    def get_file_urls(self):  # get URLs of all pre-combination stub-meta-history files
+        request = urllib2.Request(self.dumpsurl, headers=self.headers)
+        dumpspage = urllib2.urlopen(request, timeout=240).read()
+        urlpaths = re.findall('"[^"]+-stub-meta-history\d.*?\.xml\.gz"', dumpspage)
+        self.urls = [self.dumpsurl+x.replace('"', '') for x in urlpaths]
+
+    @staticmethod
+    def download_single_file(url, filepath):
+        print "Downloading " + url
+        done = False
+        while not done:
+            try:
+                urllib.urlretrieve(url, filepath)
+                done = True
+            except Exception, e:
+                print str(e)
+                time.sleep(STANDARD_DELAY)
+        return filepath
+
+    def go(self, prepped=False):  # handle all segmented stub-meta-history files in sequence
+        if prepped is False:
+            self.get_file_urls()
+        urls_done = [x[0] for x in self.counters]
+        for url in self.urls:
+            try:
+                if url in urls_done:
+                    print url, "already done"
+                    continue
+                filepath = self.download_single_file(url, self.temp_filepath)
+                print "Reading...."
+                users_from_file = self.count_creators_in_file(filepath)
+                self.counters.append((url, users_from_file))
+                print
+                print "Deleting ...."
+                os.unlink(filepath)
+            except KeyboardInterrupt:
+                break
             
     def dump(self):
-        output=""
+        output = ""
         for c in self.counters:
-            path=c[0]
-            dixie=c[1]
-            for d in dixie.keys():
-                newline=path+"\t"+str(d)+"\t"+str(dixie[d])+"\n"
-                output+=newline
+            path = c[0]
+            article_counts = c[1]
+            for username, count in article_counts.iteritems():
+                new_line = self.generate_output_line(path, username, count)
+                output += new_line
         return output
-        
-    def countusers(self,path,offset=0,cutoff=False):
-        import dateutil.parser
-        if path.endswith(".gz"):
-            file=gzip.GzipFile(path)
-        else:
-            file=open(path)
-        if offset:
-            file.seek(offset)
-        i=0
-        reading=False
-        reading_rev=False
-        try:
-            for line in file:
-                i+=1 
-                line=line.strip()
-                if line.startswith("<page"):
-                    reading=True
-                    revisions=[]
-                    reading_rev=False
-                    thetitle=""
-                    continue
-                if reading is not True:
-                    continue
-                else:
-                    if line.startswith("</page>"):
-                        if revisions:
-                            sortedrevs=list(revisions)
-                            sortedrevs.sort()
-                            username=sortedrevs[0][1]
-                            if username != revisions[0][1]:
-                                self.replaced_users.add((thetitle,username,revisions[0][1]))
-                            self.matchups[thetitle]=username
-                        else:
-                            print "No revisions! ", thetitle
-                        reading=False
-                        reading_rev=False
-                        stdout.write("\r") #put progress counter here to minimize waste
-                        stdout.flush()
-                        stdout.write(str(i))
-                        continue
-                    elif reading_rev is True:
-                        if line.startswith("<timestamp>"):
-                            timestamp=line.split(">")[1].split("<")[0]
-                            continue
-                        elif line.startswith("<ip") or line.startswith("<username"): 
-                            if not timestamp: # just in case -- has not been triggered thus far
-                                print "No timestamp!",thetitle
-                            else:
-                                thetime=dateutil.parser.parse(timestamp)
-                                if line.startswith("<ip>"): #need to avoid counting pages created by IP for the first registered user to edit
-                                    username="IP:"+line.split(">")[1].split("<")[0].strip()
-                                elif line.startswith("<username />"):
-                                    username=""
-                                elif line.startswith("<username"):
-                                    username=line.split(">")[1].split("<")[0].strip()
-                                else:
-                                    username="UNASSIGNED" #make sure there is no leak here
-                                revisions.append((thetime,username))
-                            reading_rev=False
-                    elif line.startswith("<revision"):
-                        reading_rev=True
-                        timestamp=""
-                        username=""
-                        continue
-                    elif line.startswith("<title>"):
-                        thetitle=line.split(">")[1].split("<")[0].strip()
-                        continue
-                    elif line.startswith("<ns>"):
-                        if not line.startswith("<ns>0<"):
-                            reading=False
-                            continue
-                    elif line.startswith("<redirect"):
-                        reading=False
-                        continue
-        except Exception, e:
-            print str(e), line
 
-                
+    @staticmethod
+    def generate_output_line(path, username, count):
+        new_line = path + "\t" + username + "\t" + str(count) + "\n"
+        return new_line
+
+
+
+
 def sortusers(users):
-    sorted=[]
+    sorted_users = []
     for u in users.keys():
-        sorted.append((users[u],u))
-    sorted.sort()
-    sorted.reverse()
-    return sorted
+        sorted_users.append((users[u], u))
+    sorted_users.sort()
+    sorted_users.reverse()
+    return sorted_users
     
 
-def summate3(matchups):
-    values=list(set(matchups.values()))
-    output=defaultdict(int)
-    i=0
+def summate(matchups):
+    output = defaultdict(int)
+    i = 0
     for v in matchups.values():
-        output[v]+=1
-        i+=1
-        if not i%100:            
-            stdout.write("\r") 
-            stdout.flush()
-            stdout.write(str(i))
+        output[v] += 1
+        i += 1
+        if not i % 100:
+            simple_progress_counter(i)
     return output
     
     
-def truncate(summation,max=10000):
-    userlist=[]
+def truncate(summation, max_users=10000):
+    userlist = []
     for s in summation.keys():
-        userlist.append((summation[s],s))
+        userlist.append((summation[s], s))
     print len(userlist)
     userlist.sort()
     userlist.reverse()
-    userlist=userlist[:max]
+    userlist = userlist[:max_users]
     return userlist
     
     
 def get_current_totals():
-    output=[]
-    pagename="Wikipedia:List_of_Wikipedians_by_article_count/Data"
-    url="http://en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=%s&rvprop=content&format=xml" % pagename
-    page=urllib2.urlopen(url,timeout=60).read()
-    page=page.split("<rev ")[1].split(">",1)[1].split("<")[0]
-    pieces=page.split("|}")[0].split("|-")[2:]
-    pieces=[x.strip() for x in pieces]
+    output = []
+    pagename = "Wikipedia:List_of_Wikipedians_by_article_count/Data"
+    url = "http://en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=%s&rvprop=content&format=xml" % pagename
+    page = urllib2.urlopen(url, timeout=60).read()
+    page = page.split("<rev ")[1].split(">", 1)[1].split("<")[0]
+    pieces = page.split("|}")[0].split("|-")[2:]
+    pieces = [x.strip() for x in pieces]
     for p in pieces:
-        data=[x.strip() for x in p.split("|") if x.strip()]
+        data = [x.strip() for x in p.split("|") if x.strip()]
         if not data: 
             continue
-        rank=int(data[0])
-        username=data[1]
-        count=int(data[2].replace(",",""))
-        output.append(tuple([rank,username,count]))
+        rank = int(data[0])
+        username = data[1]
+        count = int(data[2].replace(",", ""))
+        output.append(tuple([rank, username, count]))
     return output
     
     
-def get_mismatches(current,summation):
-    mismatched=[] # list of tuples: (discrepancy,username,current,new)
-    currentdict=dict([(x[1],x[2]) for x in current])
+def get_mismatches(current, summation):
+    mismatched = []  # list of tuples: (discrepancy,username,current,new)
+    currentdict = dict([(x[1], x[2]) for x in current])
     for c in currentdict.keys():
         if c in summation.keys():
             if int(summation[c]) != int(currentdict[c]):
-                diff=int(summation[c])-int(currentdict[c])
-                mismatched.append((diff,c,currentdict[c],summation[c]))
+                diff = int(summation[c]) - int(currentdict[c])
+                mismatched.append((diff, c, currentdict[c], summation[c]))
     mismatched.sort()
     mismatched.reverse()
     return mismatched
     
     
 def getanons():
-    pagename="Wikipedia:List of Wikipedians by number of edits/Anonymous".replace(" ","_")
-    url="http://en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=%s&rvprop=content&format=xml" % pagename
-    anonpage=urllib2.urlopen(url,timeout=60).read()
-    anonpage=anonpage.split("==\n",1)[1]
-    anons=[x.split("]]")[0] for x in anonpage.split("[[User:")[1:]]
+    # some contributors desire to be excluded
+    pagename = "Wikipedia:List of Wikipedians by number of edits/Anonymous".replace(" ", "_")
+    url = "http://en.wikipedia.org/w/api.php?action=query&prop=revisions&titles=%s&rvprop=content&format=xml" % pagename
+    anonpage = urllib2.urlopen(url, timeout=60).read()
+    anonpage = anonpage.split("==\n", 1)[1]
+    anons = [x.split("]]")[0] for x in anonpage.split("[[User:")[1:]]
     print str(len(anons))+" anons"
     return anons
     
     
-def replaceanons(wikitext,anons=[]):
-    if not anons:
-        anons=getanons()
+def replaceanons(wikitext, anons=False):
+    if anons is False:
+        anons = getanons()
     for anon in anons:
-        catchme="| %s\n" % anon
+        catchme = "| %s\n" % anon
         if catchme in wikitext:
             print "Effacing "+anon
-            wikitext=wikitext.replace(catchme, "| [Placeholder]\n")
+            wikitext = wikitext.replace(catchme, "| [Placeholder]\n")
     return wikitext
 
 
-def dumpusers(foo,userlist=[]): # Downloader object
-    outdict=defaultdict(set)
-    for tracker in foo.trackers:
-        path=tracker[0]
-        for user in tracker[1].keys():
-            outdict[user] |= tracker[1][user]
-    outtext=""
-    for user in outdict.keys():
-        newline=user+"\t"
-        newline="[["
-        newline+="]] - [[".join(outdict[user])
-        newline+="]]\n"
-        outtext+=newline
-    return outtext
-
-
 def dumpdict(foo):
-    keylist=foo.matchups.keys()
+    keylist = foo.matchups.keys()
     keylist.sort()
-    output=""
+    output = ""
     for k in keylist:
-        output+="%s\t%s\n" % (k,foo.matchups[k])
+        output += "%s\t%s\n" % (k, foo.matchups[k])
     return output
 
 
-def makedatapage(userlist): #as returned by truncate()
-    text="""{| class="wikitable sortable"
-|- style="white-space:nowrap;"
-! No.
-! User
-! Article count
-|-"""
+def makedatapage(userlist):  # as returned by truncate()
+    text = ("\n"
+            "{| class = \"wikitable sortable\"\n"
+            "|- style = \"white-space:nowrap;\"\n"
+            "! No.\n"
+            "! User\n"
+            "! Article count\n"
+            "|-")
     for u in userlist:
-        number=str(userlist.index(u)+1)
-        count=str(u[0])
-        newlines="""
-| %s
-| %s
-| %s
-|-""" % (number,u[1],count)
+        number = str(userlist.index(u)+1)
+        count = str(u[0])
+        newlines = ("\n"
+                    "| %s\n"
+                    "| %s\n"
+                    "| %s\n"
+                    "|-") % (number, u[1], count)
         text += newlines
     text += "\n|}"
     return text
     
     
-def totalprep(downloader): # take completed Downloader and make Data page
-    summation=summate3(downloader.matchups)
-    print
-    truncation=truncate(summation,5000)
-    datapage=makedatapage(truncation)
-    datapage=replaceanons(datapage)
+def totalprep(downloader):  # take completed Downloader and make Data page
+    summation = summate(downloader.matchups)
+    truncation = truncate(summation, 5000)
+    datapage = makedatapage(truncation)
+    datapage = replaceanons(datapage)
     return datapage
+
+
+def simple_progress_counter(i):
+    stdout.write("\r")
+    stdout.flush()
+    stdout.write(str(i))
