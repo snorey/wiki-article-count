@@ -54,8 +54,6 @@ class Downloader:
                             username=sortedrevs[0][1]
                             if username != revisions[0][1]:
                                 self.replaced_users.add((thetitle,username,revisions[0][1]))
-#                            self.users[username]+=1
-#                           self.tracker[username].add(thetitle)
                             self.matchups[thetitle]=username
                         else:
                             print "No revisions! ", thetitle
@@ -101,7 +99,6 @@ class Downloader:
                         continue
         except Exception, e:
             print str(e), line
-
             
     def process(self): # get URLs of all pre-combination stub-meta-history files
         request=urllib2.Request(self.dumpsurl,headers=self.headers)
@@ -132,8 +129,7 @@ class Downloader:
             print
             print "Deleting ...."
             os.unlink(filepath)
-
-        
+            
     def dump(self):
         output=""
         for c in self.counters:
@@ -144,8 +140,7 @@ class Downloader:
                 output+=newline
         return output
         
-
-    def countusers(self,path,offset=0,cutoff=False): # for testing hypothesis about revision order sometimes being off
+    def countusers(self,path,offset=0,cutoff=False):
         import dateutil.parser
         if path.endswith(".gz"):
             file=gzip.GzipFile(path)
@@ -154,8 +149,6 @@ class Downloader:
         if offset:
             file.seek(offset)
         i=0
-#        self.users= defaultdict(int)
-#        self.tracker=defaultdict(set)
         reading=False
         reading_rev=False
         try:
@@ -224,8 +217,7 @@ class Downloader:
         except Exception, e:
             print str(e), line
 
-        
-        
+                
 def sortusers(users):
     sorted=[]
     for u in users.keys():
