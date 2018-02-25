@@ -107,6 +107,8 @@ class Downloader:
         self.urls=[self.dumpsurl+x.replace('"','') for x in urlpaths]
         
     def go(self): # to download, process, and delete the segmented stub-meta-history files in sequence
+        if not hasattr(self,"urls"):
+            self.process()
         doneurls=[x[0] for x in self.counters]
         for u in self.urls:
             if u in doneurls:
