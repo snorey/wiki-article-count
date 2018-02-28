@@ -5,14 +5,29 @@ import os
 import re
 from sys import stdout
 import time
-import unittest
 import urllib
 import urllib2
 
 
-# seconds to wait if download raises error
+"""Script to provide number of articles created by Wikipedia users.
+Will work on any WMF project generating a stub-meta-history dump.
+
+NOTE: Because this must iterate over hundreds of millions of revisions, and billions
+of lines of XML, in order to run efficiently in the laptop environment, the script  
+is optimized against the *exact* format used in Wikimedia XML dumps.  Consequently, 
+the results could be rendered unreliable by minor changes in Wikimedia XML dump format. 
+Fortunately, as of 2018, there have not been any such changes in recent years.
+ """
+
+
+# to do:
+# 1. add unit tests
+# 2. run a check over the first <Page> in each input file to verify format assumptions
+
+
+# seconds to wait if download raises error:
 STANDARD_DELAY = 10
-# username initially assigned to a revision
+# username initially assigned to a revision:
 DEFAULT_USERNAME = "UNASSIGNED"
 # username should never have default value,
 # so this should be noisy, not whitespace
@@ -63,8 +78,6 @@ class Line(str):
 
     def get_username(self):
         if self.startswith("<ip>"):
-            # need to avoid giving first registered user credit for
-            # pages created by IP
             username = "IP:" + self.get_content()
         elif self.startswith("<username />"):
             # here the blank username is a deliberate MediaWiki feature
@@ -89,15 +102,15 @@ class Revision(object):
 class Page(object):
 
     def __init__(self):
-        raise NotImplementedError
         self.title = False
         self.oldest_revision = False
+        raise NotImplementedError
 
 
 class FileReader(object):
 
-    def __init__(self, downloader, filepath):
-        self.downloader = downloader
+    def __init__(self, manager, filepath):
+        self.manager = manager
         self.filepath = filepath
         self.current_page_title = ""
         self.reading = False
@@ -141,7 +154,7 @@ class FileReader(object):
     def attribute_page(self):
         if self.oldest_revision is not False:
             oldest_user = self.oldest_revision.username
-            self.downloader.matchups[self.oldest_revision.title] = oldest_user
+            self.manager.matchups[self.oldest_revision.title] = oldest_user
             self.counter[oldest_user] += 1
         else:
             print "No revisions!", self.current_page_title
@@ -213,10 +226,10 @@ class FileReader(object):
         return self.counter
 
 
-class Downloader(object):
+class Manager(object):
 
-    def __init__(self):
-        self.dumpsurl = "http://dumps.wikimedia.your.org/enwiki/latest/"
+    def __init__(self, project="enwiki"):
+        self.dumpsurl = "http://dumps.wikimedia.your.org/%s/latest/" % project
         self.headers = {'User-agent': 'JumpingSpider/0.0'}
         self.counters = []
         self.urls = []
@@ -411,8 +424,8 @@ def makedatapage(userlist):  # as returned by truncate()
     return text
     
     
-def totalprep(downloader):  # take completed Downloader and make Data page
-    summation = summate(downloader.matchups)
+def totalprep(manager):  # take completed Manager and make Data page
+    summation = summate(manager.matchups)
     truncation = truncate(summation, 5000)
     datapage = makedatapage(truncation)
     datapage = replaceanons(datapage)
