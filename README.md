@@ -22,3 +22,5 @@ output = totalprep(foo)
 output_file = open("output.txt","w")
 output_file.write(output)
 ```
+
+Warning: do not set your laptop on anything flammable while running the above code.
